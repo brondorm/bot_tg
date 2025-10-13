@@ -9,8 +9,8 @@ from typing import Optional
 from dotenv import load_dotenv
 from telegram import KeyboardButton, ReplyKeyboardMarkup, Update
 from telegram.constants import ParseMode
-from telegram.ext import (Application, ApplicationBuilder, CommandHandler,
-                          ContextTypes, MessageHandler, filters)
+from telegram.ext import (Application, ApplicationBuilder, CallbackQueryHandler,
+                          CommandHandler, ContextTypes, MessageHandler, filters)
 
 from database import Database
 
@@ -157,21 +157,97 @@ async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
     prefix = f"Новое сообщение от {full_name or username or user_id} (ID: {user_id}):"
+    reply_markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton(text="Ответить", callback_data=f"reply:{user_id}")]
+    ])
+
     if message_type == "text":
         await context.bot.send_message(
             chat_id=settings.admin_chat_id,
             text=f"{prefix}\n{message.text}",
+            reply_markup=reply_markup,
         )
     else:
         await context.bot.send_message(
             chat_id=settings.admin_chat_id,
             text=f"{prefix}\nТип: {message_type}",
+            reply_markup=reply_markup,
         )
         await context.bot.copy_message(
             chat_id=settings.admin_chat_id,
             from_chat_id=message.chat_id,
             message_id=message.message_id,
         )
+
+
+async def prompt_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    global settings
+    if settings is None:
+        raise RuntimeError("Settings not loaded")
+
+    query = update.callback_query
+    if query is None or query.data is None:
+        return
+
+    if query.message is None or query.message.chat_id != settings.admin_chat_id:
+        await query.answer()
+        return
+
+    if not query.data.startswith("reply:"):
+        await query.answer()
+        return
+
+    target = query.data.split(":", 1)[1]
+    try:
+        target_user_id = int(target)
+    except ValueError:
+        await query.answer(text="Некорректный идентификатор", show_alert=True)
+        return
+
+    context.chat_data["reply_user_id"] = target_user_id
+
+    await query.message.reply_text(
+        "Введите ответ клиенту:",
+        reply_markup=ForceReply(selective=True),
+    )
+    await query.answer()
+
+
+async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    global settings, db
+    if settings is None:
+        raise RuntimeError("Settings not loaded")
+    if db is None:
+        raise RuntimeError("Database not initialized")
+
+    message = update.effective_message
+    if message is None:
+        return
+
+    if update.effective_chat is None or update.effective_chat.id != settings.admin_chat_id:
+        return
+
+    target_user_id = context.chat_data.get("reply_user_id")
+    if target_user_id is None:
+        return
+
+    if not message.text:
+        await message.reply_text("Можно отправлять только текстовые ответы")
+        return
+
+    await context.bot.send_message(chat_id=target_user_id, text=message.text)
+
+    db.add_message(
+        user_id=target_user_id,
+        username=None,
+        full_name=None,
+        direction="from_admin",
+        message_type="text",
+        content=message.text,
+    )
+
+    context.chat_data.pop("reply_user_id", None)
+    await message.reply_text("Сообщение отправлено клиенту")
 
 
 async def reply_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
