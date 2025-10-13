@@ -4,7 +4,7 @@ import asyncio
 import logging
 import os
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 from dotenv import load_dotenv
 from telegram import (InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton,
@@ -57,6 +57,14 @@ def get_user_display(update: Update) -> tuple[int, Optional[str], Optional[str]]
     full_name = " ".join(filter(None, [user.first_name, user.last_name])) or None
     username = user.username
     return user.id, username, full_name
+
+
+def get_admin_state(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
+    if settings is None:
+        raise RuntimeError("Settings not loaded")
+    admin_states = context.bot_data.setdefault("admin_states", {})
+    state = admin_states.setdefault(settings.admin_chat_id, {})
+    return state
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -161,7 +169,7 @@ async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TY
         except Exception:
             logger.exception("Failed to copy client message to admin chat")
 
-    admin_state = context.application.chat_data.setdefault(settings.admin_chat_id, {})
+    admin_state = get_admin_state(context)
     reply_targets = admin_state.setdefault("reply_targets", {})
     reply_targets[notification.message_id] = {
         "user_id": user_id,
@@ -173,13 +181,6 @@ async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TY
             "user_id": user_id,
             "display": display_name,
         }
-
-    admin_state = context.application.chat_data.setdefault(settings.admin_chat_id, {})
-    reply_targets = admin_state.setdefault("reply_targets", {})
-    reply_targets[notification.message_id] = {
-        "user_id": user_id,
-        "display": display_name,
-    }
 
 
 async def prompt_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -203,7 +204,7 @@ async def prompt_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     except Exception:
         logger.debug("Could not remove inline keyboard for reply prompt", exc_info=True)
 
-    admin_state = context.application.chat_data.setdefault(settings.admin_chat_id, {})
+    admin_state = get_admin_state(context)
     reply_targets = admin_state.setdefault("reply_targets", {})
     identity = str(target_user_id)
     stored_target = reply_targets.get(query.message.message_id)
@@ -236,7 +237,7 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if update.effective_chat.id != settings.admin_chat_id:
         return
 
-    admin_state = context.application.chat_data.setdefault(settings.admin_chat_id, {})
+    admin_state = get_admin_state(context)
     reply_targets = admin_state.get("reply_targets", {})
 
     target_info: Optional[dict[str, object]] = None
