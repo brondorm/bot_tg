@@ -70,10 +70,34 @@ class Database:
     def list_clients(self) -> List[Tuple[int, Optional[str], Optional[str], str]]:
         query = (
             """
-            SELECT m.user_id, m.username, m.full_name, MAX(m.created_at) as last_message
-            FROM messages m
-            GROUP BY m.user_id, m.username, m.full_name
-            ORDER BY last_message DESC
+            WITH latest AS (
+                SELECT user_id, MAX(created_at) AS last_message
+                FROM messages
+                GROUP BY user_id
+            )
+            SELECT
+                latest.user_id,
+                (
+                    SELECT username
+                    FROM messages m2
+                    WHERE m2.user_id = latest.user_id
+                        AND m2.username IS NOT NULL
+                        AND m2.username <> ''
+                    ORDER BY m2.created_at DESC
+                    LIMIT 1
+                ) AS username,
+                (
+                    SELECT full_name
+                    FROM messages m3
+                    WHERE m3.user_id = latest.user_id
+                        AND m3.full_name IS NOT NULL
+                        AND m3.full_name <> ''
+                    ORDER BY m3.created_at DESC
+                    LIMIT 1
+                ) AS full_name,
+                latest.last_message
+            FROM latest
+            ORDER BY latest.last_message DESC
             """
         )
         with self._get_connection() as conn:

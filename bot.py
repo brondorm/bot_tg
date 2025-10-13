@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import os
 from dataclasses import dataclass
@@ -216,7 +217,7 @@ async def prompt_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "display": identity,
     }
 
-    await context.bot.send_message(
+    prompt_message = await context.bot.send_message(
         chat_id=settings.admin_chat_id,
         text=(
             f"Ответ для клиента {identity} (ID: {target_user_id}).\n"
@@ -224,7 +225,6 @@ async def prompt_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         ),
     )
 
-    context.chat_data["pending_reply_to"] = target_user_id
     context.chat_data["pending_reply_prompt_id"] = prompt_message.message_id
 
 
@@ -287,6 +287,7 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
     admin_state.pop("pending_reply", None)
+    context.chat_data.pop("pending_reply_prompt_id", None)
     await message.reply_text("Сообщение отправлено клиенту")
 
 
@@ -331,14 +332,23 @@ def format_history_entries(history: list[tuple[str, str, Optional[str], str]], u
     if not history:
         return "История пуста"
 
-    lines = [f"История переписки с {user_id} (последние {len(history)}):"]
+    header = (
+        f"<b>История переписки с {html.escape(str(user_id))} "
+        f"(последние {len(history)}):</b>"
+    )
+    lines = [header]
     for direction, message_type, body, created_at in history:
         author = "Клиент" if direction == "from_client" else "Вы"
         if message_type in {"text", "command"}:
-            content = body
+            content = body or ""
         else:
-            content = f"[{message_type}] {body}"
-        lines.append(f"{created_at} — {author}: {content}")
+            content = f"[{message_type}] {body or ''}"
+
+        line = (
+            f"{html.escape(created_at)} — {html.escape(author)}: "
+            f"{html.escape(content)}"
+        )
+        lines.append(line)
 
     return "\n".join(lines)
 
@@ -361,9 +371,15 @@ async def clients_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     lines = ["Клиенты:"]
     keyboard_buttons = []
     for user_id, username, full_name, last_message in clients[:10]:
-        identity = full_name or username or str(user_id)
-        handle = f" (@{username})" if username else ""
-        lines.append(f"• {identity}{handle} — последний контакт: {last_message}")
+        identity = full_name or (f"@{username}" if username else str(user_id))
+        details: list[str] = []
+        if username and identity != f"@{username}":
+            details.append(f"@{username}")
+        details.append(f"ID: {user_id}")
+        details_text = f" ({', '.join(details)})" if details else ""
+        lines.append(
+            f"• {identity}{details_text} — последний контакт: {last_message}"
+        )
         keyboard_buttons.append(
             [InlineKeyboardButton(identity, callback_data=f"history:{user_id}")]
         )
