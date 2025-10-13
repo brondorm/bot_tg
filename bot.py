@@ -7,8 +7,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from dotenv import load_dotenv
-from telegram import (ForceReply, InlineKeyboardButton, InlineKeyboardMarkup,
-                      Update)
+from telegram import KeyboardButton, ReplyKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import (Application, ApplicationBuilder, CallbackQueryHandler,
                           CommandHandler, ContextTypes, MessageHandler, filters)
@@ -46,6 +45,15 @@ db: Optional[Database] = None
 settings: Optional[Settings] = None
 
 
+ADMIN_KEYBOARD = ReplyKeyboardMarkup(
+    [
+        [KeyboardButton("Клиенты"), KeyboardButton("История")],
+        [KeyboardButton("Меню")],
+    ],
+    resize_keyboard=True,
+)
+
+
 def get_user_display(update: Update) -> tuple[int, Optional[str], Optional[str]]:
     assert update.effective_user is not None
     user = update.effective_user
@@ -55,8 +63,25 @@ def get_user_display(update: Update) -> tuple[int, Optional[str], Optional[str]]
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    global settings, db
+    if settings is None:
+        raise RuntimeError("Settings not loaded")
+
+    message = update.message
+    chat = update.effective_chat
+    if message is None or chat is None:
+        return
+
+    if chat.id == settings.admin_chat_id:
+        await message.reply_text(
+            "Здравствуйте! Здесь вы можете управлять ботом.",
+            reply_markup=ADMIN_KEYBOARD,
+        )
+        return
+
     if db is None:
         raise RuntimeError("Database not initialized")
+
     user_id, username, full_name = get_user_display(update)
     db.add_message(
         user_id=user_id,
@@ -66,8 +91,28 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message_type="command",
         content="/start",
     )
-    await update.message.reply_text(
-        "Здравствуйте! Напишите ваш вопрос, и я скоро отвечу."
+    await message.reply_text("Здравствуйте! Напишите ваш вопрос, и я скоро отвечу.")
+
+
+async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    global settings
+    if settings is None:
+        raise RuntimeError("Settings not loaded")
+
+    message = update.message
+    chat = update.effective_chat
+    if message is None or chat is None:
+        return
+
+    if chat.id != settings.admin_chat_id:
+        return
+
+    await message.reply_text(
+        "Доступные кнопки:\n"
+        "• «Клиенты» — показать список клиентов.\n"
+        "• «История» — используйте команду /history <id> для просмотра переписки.\n"
+        "• «Меню» — повторно показать клавиатуру.",
+        reply_markup=ADMIN_KEYBOARD,
     )
 
 
@@ -328,20 +373,23 @@ async def main() -> None:
     application.add_handler(CommandHandler("reply", reply_command))
     application.add_handler(CommandHandler("clients", clients_command))
     application.add_handler(CommandHandler("history", history_command))
-    application.add_handler(CallbackQueryHandler(prompt_reply, pattern=r"^reply:"))
+    application.add_handler(CommandHandler("menu", menu_command))
+
+    admin_chat_filter = filters.Chat(settings.admin_chat_id)
+
     application.add_handler(
-        MessageHandler(
-            filters.Chat(settings.admin_chat_id)
-            & filters.REPLY
-            & filters.TEXT
-            & (~filters.COMMAND),
-            handle_admin_reply,
-        )
+        MessageHandler(admin_chat_filter & filters.Regex("^Клиенты$"), clients_command)
+    )
+    application.add_handler(
+        MessageHandler(admin_chat_filter & filters.Regex("^История$"), history_command)
+    )
+    application.add_handler(
+        MessageHandler(admin_chat_filter & filters.Regex("^Меню$"), menu_command)
     )
 
     application.add_handler(
         MessageHandler(
-            filters.ALL & (~filters.COMMAND),
+            (~admin_chat_filter) & (~filters.COMMAND),
             handle_client_message,
         )
     )
