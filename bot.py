@@ -4,11 +4,11 @@ import asyncio
 import logging
 import os
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 from dotenv import load_dotenv
-from telegram import (ForceReply, InlineKeyboardButton, InlineKeyboardMarkup,
-                      KeyboardButton, ReplyKeyboardMarkup, Update)
+from telegram import (InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton,
+                      ReplyKeyboardMarkup, Update)
 from telegram.constants import ParseMode
 from telegram.ext import (Application, ApplicationBuilder, CallbackQueryHandler,
                           CommandHandler, ContextTypes, MessageHandler, filters)
@@ -57,6 +57,14 @@ def get_user_display(update: Update) -> tuple[int, Optional[str], Optional[str]]
     full_name = " ".join(filter(None, [user.first_name, user.last_name])) or None
     username = user.username
     return user.id, username, full_name
+
+
+def get_admin_state(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
+    if settings is None:
+        raise RuntimeError("Settings not loaded")
+    admin_states = context.bot_data.setdefault("admin_states", {})
+    state = admin_states.setdefault(settings.admin_chat_id, {})
+    return state
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -133,28 +141,46 @@ async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TY
         file_id=file_id,
     )
 
-    prefix = f"Новое сообщение от {full_name or username or user_id} (ID: {user_id}):"
+    display_name = full_name or username or str(user_id)
+    prefix = f"Новое сообщение от {display_name} (ID: {user_id}):"
     reply_keyboard = InlineKeyboardMarkup(
         [[InlineKeyboardButton("Ответить", callback_data=f"reply:{user_id}")]]
     )
 
+    forwarded = None
     if message_type == "text":
-        await context.bot.send_message(
+        notification = await context.bot.send_message(
             chat_id=settings.admin_chat_id,
             text=f"{prefix}\n{message.text}",
             reply_markup=reply_keyboard,
         )
     else:
-        await context.bot.send_message(
+        notification = await context.bot.send_message(
             chat_id=settings.admin_chat_id,
             text=f"{prefix}\nТип: {message_type}",
             reply_markup=reply_keyboard,
         )
-        await context.bot.copy_message(
-            chat_id=settings.admin_chat_id,
-            from_chat_id=message.chat_id,
-            message_id=message.message_id,
-        )
+        try:
+            forwarded = await context.bot.copy_message(
+                chat_id=settings.admin_chat_id,
+                from_chat_id=message.chat_id,
+                message_id=message.message_id,
+            )
+        except Exception:
+            logger.exception("Failed to copy client message to admin chat")
+
+    admin_state = get_admin_state(context)
+    reply_targets = admin_state.setdefault("reply_targets", {})
+    reply_targets[notification.message_id] = {
+        "user_id": user_id,
+        "display": display_name,
+    }
+
+    if forwarded is not None:
+        reply_targets[forwarded.message_id] = {
+            "user_id": user_id,
+            "display": display_name,
+        }
 
 
 async def prompt_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -163,21 +189,39 @@ async def prompt_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     query = update.callback_query
     if query is None or query.message is None:
         return
-    if query.message.chat.id != settings.admin_chat_id:
-        await query.answer()
-        return
-
     _, _, user_id_str = query.data.partition(":") if query.data else ("", "", "")
     if not user_id_str.isdigit():
         await query.answer(text="Не удалось определить пользователя", show_alert=True)
         return
 
     target_user_id = int(user_id_str)
-    context.chat_data["pending_reply_to"] = target_user_id
-    await query.answer()
-    await query.message.reply_text(
-        "Введите ответ для клиента:",
-        reply_markup=ForceReply(selective=True),
+    await query.answer("Введите сообщение в админ-чате")
+
+    # Remove inline buttons so the admin sees that the request is handled and
+    # prevent repeated presses that confuse the reply UI.
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        logger.debug("Could not remove inline keyboard for reply prompt", exc_info=True)
+
+    admin_state = get_admin_state(context)
+    reply_targets = admin_state.setdefault("reply_targets", {})
+    identity = str(target_user_id)
+    stored_target = reply_targets.get(query.message.message_id)
+    if stored_target and stored_target.get("display"):
+        identity = stored_target["display"]
+
+    admin_state["pending_reply"] = {
+        "user_id": target_user_id,
+        "display": identity,
+    }
+
+    await context.bot.send_message(
+        chat_id=settings.admin_chat_id,
+        text=(
+            f"Ответ для клиента {identity} (ID: {target_user_id}).\n"
+            "Напишите следующее текстовое сообщение в этом чате, чтобы отправить его клиенту."
+        ),
     )
 
 
@@ -190,13 +234,36 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if update.effective_chat.id != settings.admin_chat_id:
         return
 
-    target_user_id = context.chat_data.get("pending_reply_to")
-    if target_user_id is None:
+    admin_state = get_admin_state(context)
+    reply_targets = admin_state.get("reply_targets", {})
+
+    target_info: Optional[dict[str, object]] = None
+
+    reply_to = message.reply_to_message
+    if reply_to is not None:
+        target_info = reply_targets.get(reply_to.message_id)
+
+    if target_info is None:
+        pending = admin_state.get("pending_reply")
+        if isinstance(pending, dict):
+            target_info = pending
+
+    if not target_info:
+        return
+
+    target_user_id = target_info.get("user_id")
+    if not isinstance(target_user_id, int):
         return
 
     reply_text = message.text
     if not reply_text:
         await message.reply_text("Ответ должен содержать текст")
+        return
+
+    service_commands = {"Клиенты", "История", "Меню"}
+    if reply_text in service_commands:
+        return
+    if reply_text.startswith("/"):
         return
 
     await context.bot.send_message(chat_id=target_user_id, text=reply_text)
@@ -210,7 +277,7 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         content=reply_text,
     )
 
-    context.chat_data.pop("pending_reply_to", None)
+    admin_state.pop("pending_reply", None)
     await message.reply_text("Сообщение отправлено клиенту")
 
 
@@ -432,7 +499,7 @@ async def main() -> None:
         MessageHandler(
             filters.Chat(settings.admin_chat_id)
             & filters.TEXT
-            & filters.REPLY,
+            & (~filters.COMMAND),
             handle_admin_reply,
         )
     )
