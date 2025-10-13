@@ -198,6 +198,8 @@ async def prompt_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     target_user_id = int(user_id_str)
     await query.answer("Введите сообщение в админ-чате")
 
+    logger.info("Reply requested for user_id=%s via message_id=%s", target_user_id, query.message.message_id)
+
     # Remove inline buttons so the admin sees that the request is handled and
     # prevent repeated presses that confuse the reply UI.
     try:
@@ -246,23 +248,37 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if reply_to is not None:
         target_info = reply_targets.get(reply_to.message_id)
 
-    if target_info is None:
-        pending = admin_state.get("pending_reply")
-        if isinstance(pending, dict):
+    pending_raw = admin_state.get("pending_reply")
+    pending = pending_raw if isinstance(pending_raw, dict) else None
+    prompt_message_id = context.chat_data.get("pending_reply_prompt_id")
+
+    if target_info is None and pending is not None:
+        if reply_to is None:
+            logger.debug(
+                "Using pending reply for user_id=%s without explicit reply", pending.get("user_id")
+            )
+            target_info = pending
+        elif prompt_message_id is not None and reply_to.message_id == prompt_message_id:
+            logger.debug(
+                "Using pending reply for user_id=%s via prompt reply", pending.get("user_id")
+            )
             target_info = pending
 
     if not target_info:
+        logger.debug(
+            "Ignoring admin message id=%s: no reply target found (reply_to=%s, pending=%s)",
+            message.message_id,
+            reply_to.message_id if reply_to else None,
+            bool(pending),
+        )
         return
 
     target_user_id = target_info.get("user_id")
     if not isinstance(target_user_id, int):
+        logger.warning(
+            "Reply target missing numeric user_id. target_info=%s", target_info
+        )
         return
-
-    prompt_message_id = context.chat_data.get("pending_reply_prompt_id")
-    if prompt_message_id is not None:
-        reply_to = message.reply_to_message
-        if reply_to is None or reply_to.message_id != prompt_message_id:
-            return
 
     reply_text = message.text
     if not reply_text:
@@ -271,8 +287,10 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     service_commands = {"Клиенты", "История", "Меню"}
     if reply_text in service_commands:
+        logger.debug("Admin message matches service command '%s', ignoring", reply_text)
         return
     if reply_text.startswith("/"):
+        logger.debug("Admin message '%s' starts with '/', ignoring", reply_text)
         return
 
     await context.bot.send_message(chat_id=target_user_id, text=reply_text)
@@ -288,6 +306,7 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     admin_state.pop("pending_reply", None)
     context.chat_data.pop("pending_reply_prompt_id", None)
+    logger.info("Sent reply from admin to user_id=%s", target_user_id)
     await message.reply_text("Сообщение отправлено клиенту")
 
 
@@ -364,6 +383,7 @@ async def clients_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     clients = db.list_clients()
+    logger.info("Fetched %s clients for admin listing", len(clients))
     if not clients:
         await update.message.reply_text("Клиентов пока нет")
         return
