@@ -4,6 +4,7 @@ import asyncio
 import html
 import logging
 import os
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -16,9 +17,18 @@ from telegram.ext import (Application, ApplicationBuilder, CallbackQueryHandler,
 
 from database import Database
 
+log_handlers = [logging.StreamHandler()]
+log_file = os.getenv("LOG_FILE")
+if log_file:
+    log_path = Path(log_file)
+    if log_path.parent and not log_path.parent.exists():
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_handlers.append(logging.FileHandler(log_path, encoding="utf-8"))
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
+    handlers=log_handlers,
 )
 logger = logging.getLogger(__name__)
 
@@ -190,6 +200,13 @@ async def prompt_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     query = update.callback_query
     if query is None or query.message is None:
         return
+    logger.debug(
+        "Prompt reply callback from user_id=%s chat_id=%s data=%r message_id=%s",
+        query.from_user.id if query.from_user else None,
+        query.message.chat.id,
+        query.data,
+        query.message.message_id,
+    )
     _, _, user_id_str = query.data.partition(":") if query.data else ("", "", "")
     if not user_id_str.isdigit():
         await query.answer(text="Не удалось определить пользователя", show_alert=True)
@@ -457,6 +474,13 @@ async def show_history_callback(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     if query is None or query.message is None:
         return
+    logger.debug(
+        "History callback from user_id=%s chat_id=%s data=%r message_id=%s",
+        query.from_user.id if query.from_user else None,
+        query.message.chat.id,
+        query.data,
+        query.message.message_id,
+    )
     if query.message.chat.id != settings.admin_chat_id:
         await query.answer()
         return
@@ -499,6 +523,22 @@ async def main() -> None:
     db = Database(settings.database_path)
 
     application: Application = ApplicationBuilder().token(settings.token).build()
+
+    async def log_button_press(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        if query is None:
+            return
+        logger.info(
+            "Button pressed: user_id=%s chat_id=%s data=%r inline_message_id=%s",
+            query.from_user.id if query.from_user else None,
+            query.message.chat.id if query.message else None,
+            query.data,
+            query.inline_message_id,
+        )
+
+    application.add_handler(
+        CallbackQueryHandler(log_button_press, block=False)
+    )
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("reply", reply_command))
