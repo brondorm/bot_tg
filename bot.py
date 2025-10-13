@@ -177,7 +177,7 @@ async def prompt_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await query.answer()
     await query.message.reply_text(
         "Введите ответ для клиента:",
-        reply_markup=ForceReply(selective=True),
+        reply_markup=ForceReply(),
     )
 
 
