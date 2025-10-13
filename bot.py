@@ -173,12 +173,23 @@ async def prompt_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     target_user_id = int(user_id_str)
-    context.chat_data["pending_reply_to"] = target_user_id
     await query.answer()
-    await query.message.reply_text(
-        "Введите ответ для клиента:",
-        reply_markup=ForceReply(selective=True),
+
+    # Remove inline buttons so the admin sees that the request is handled and
+    # prevent repeated presses that confuse the reply UI.
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        logger.debug("Could not remove inline keyboard for reply prompt", exc_info=True)
+
+    prompt_message = await context.bot.send_message(
+        chat_id=settings.admin_chat_id,
+        text=f"Введите ответ для клиента (ID: {target_user_id}):",
+        reply_markup=ForceReply(selective=False, input_field_placeholder="Ответ клиенту"),
     )
+
+    context.chat_data["pending_reply_to"] = target_user_id
+    context.chat_data["pending_reply_prompt_id"] = prompt_message.message_id
 
 
 async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -193,6 +204,12 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     target_user_id = context.chat_data.get("pending_reply_to")
     if target_user_id is None:
         return
+
+    prompt_message_id = context.chat_data.get("pending_reply_prompt_id")
+    if prompt_message_id is not None:
+        reply_to = message.reply_to_message
+        if reply_to is None or reply_to.message_id != prompt_message_id:
+            return
 
     reply_text = message.text
     if not reply_text:
@@ -211,6 +228,7 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
     context.chat_data.pop("pending_reply_to", None)
+    context.chat_data.pop("pending_reply_prompt_id", None)
     await message.reply_text("Сообщение отправлено клиенту")
 
 
