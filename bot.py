@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 from dotenv import load_dotenv
-from telegram import (ForceReply, InlineKeyboardButton, InlineKeyboardMarkup,
-                      KeyboardButton, ReplyKeyboardMarkup, Update)
+from telegram import (InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton,
+                      ReplyKeyboardMarkup, Update)
 from telegram.constants import ParseMode
 from telegram.ext import (Application, ApplicationBuilder, CallbackQueryHandler,
                           CommandHandler, ContextTypes, MessageHandler, filters)
@@ -133,19 +133,20 @@ async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TY
         file_id=file_id,
     )
 
-    prefix = f"Новое сообщение от {full_name or username or user_id} (ID: {user_id}):"
+    display_name = full_name or username or str(user_id)
+    prefix = f"Новое сообщение от {display_name} (ID: {user_id}):"
     reply_keyboard = InlineKeyboardMarkup(
         [[InlineKeyboardButton("Ответить", callback_data=f"reply:{user_id}")]]
     )
 
     if message_type == "text":
-        await context.bot.send_message(
+        notification = await context.bot.send_message(
             chat_id=settings.admin_chat_id,
             text=f"{prefix}\n{message.text}",
             reply_markup=reply_keyboard,
         )
     else:
-        await context.bot.send_message(
+        notification = await context.bot.send_message(
             chat_id=settings.admin_chat_id,
             text=f"{prefix}\nТип: {message_type}",
             reply_markup=reply_keyboard,
@@ -156,6 +157,13 @@ async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TY
             message_id=message.message_id,
         )
 
+    admin_state = context.application.chat_data.setdefault(settings.admin_chat_id, {})
+    reply_targets = admin_state.setdefault("reply_targets", {})
+    reply_targets[notification.message_id] = {
+        "user_id": user_id,
+        "display": display_name,
+    }
+
 
 async def prompt_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if settings is None:
@@ -163,21 +171,42 @@ async def prompt_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     query = update.callback_query
     if query is None or query.message is None:
         return
-    if query.message.chat.id != settings.admin_chat_id:
-        await query.answer()
-        return
-
     _, _, user_id_str = query.data.partition(":") if query.data else ("", "", "")
     if not user_id_str.isdigit():
         await query.answer(text="Не удалось определить пользователя", show_alert=True)
         return
 
     target_user_id = int(user_id_str)
-    context.chat_data["pending_reply_to"] = target_user_id
-    await query.answer()
-    await query.message.reply_text(
-        "Введите ответ для клиента:",
-        reply_markup=ForceReply(selective=True),
+    await query.answer("Введите сообщение в админ-чате")
+
+    # Remove inline buttons so the admin sees that the request is handled and
+    # prevent repeated presses that confuse the reply UI.
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        logger.debug("Could not remove inline keyboard for reply prompt", exc_info=True)
+
+    admin_state = context.application.chat_data.setdefault(settings.admin_chat_id, {})
+    admin_state["pending_reply_to"] = target_user_id
+    admin_state["pending_reply_source"] = {
+        "type": "button",
+        "chat_id": query.message.chat.id,
+        "message_id": query.message.message_id,
+    }
+
+    identity = target_user_id
+    stored_target = None
+    if query.message.chat.id == settings.admin_chat_id:
+        stored_target = admin_state.get("reply_targets", {}).get(query.message.message_id)
+    if stored_target and stored_target.get("display"):
+        identity = stored_target["display"]
+
+    await context.bot.send_message(
+        chat_id=settings.admin_chat_id,
+        text=(
+            f"Ответ для клиента {identity} (ID: {target_user_id}).\n"
+            "Отправьте текстовое сообщение без команд, чтобы переслать его клиенту."
+        ),
     )
 
 
@@ -190,13 +219,33 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if update.effective_chat.id != settings.admin_chat_id:
         return
 
-    target_user_id = context.chat_data.get("pending_reply_to")
+    admin_state = context.application.chat_data.setdefault(settings.admin_chat_id, {})
+    reply_targets = admin_state.get("reply_targets", {})
+
+    target_user_id: Optional[int] = None
+    reply_to = message.reply_to_message
+    if reply_to is not None:
+        target_info = reply_targets.get(reply_to.message_id)
+        if target_info:
+            target_user_id = target_info.get("user_id")
+
+    if target_user_id is None:
+        pending_target = admin_state.get("pending_reply_to")
+        if pending_target is not None:
+            target_user_id = pending_target
+
     if target_user_id is None:
         return
 
     reply_text = message.text
     if not reply_text:
         await message.reply_text("Ответ должен содержать текст")
+        return
+
+    service_commands = {"Клиенты", "История", "Меню"}
+    if reply_text in service_commands:
+        return
+    if reply_text.startswith("/"):
         return
 
     await context.bot.send_message(chat_id=target_user_id, text=reply_text)
@@ -210,7 +259,8 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         content=reply_text,
     )
 
-    context.chat_data.pop("pending_reply_to", None)
+    admin_state.pop("pending_reply_to", None)
+    admin_state.pop("pending_reply_source", None)
     await message.reply_text("Сообщение отправлено клиенту")
 
 
@@ -432,7 +482,7 @@ async def main() -> None:
         MessageHandler(
             filters.Chat(settings.admin_chat_id)
             & filters.TEXT
-            & filters.REPLY,
+            & (~filters.COMMAND),
             handle_admin_reply,
         )
     )
