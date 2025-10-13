@@ -224,6 +224,9 @@ async def prompt_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         ),
     )
 
+    context.chat_data["pending_reply_to"] = target_user_id
+    context.chat_data["pending_reply_prompt_id"] = prompt_message.message_id
+
 
 async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if settings is None or db is None:
@@ -254,6 +257,12 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     target_user_id = target_info.get("user_id")
     if not isinstance(target_user_id, int):
         return
+
+    prompt_message_id = context.chat_data.get("pending_reply_prompt_id")
+    if prompt_message_id is not None:
+        reply_to = message.reply_to_message
+        if reply_to is None or reply_to.message_id != prompt_message_id:
+            return
 
     reply_text = message.text
     if not reply_text:
