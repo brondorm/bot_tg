@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from dotenv import load_dotenv
+from telegram import InlineKeyboardMarkup, InlineKeyboardButton
 from telegram import KeyboardButton, ReplyKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import (Application, ApplicationBuilder, CallbackQueryHandler,
