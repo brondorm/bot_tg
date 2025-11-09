@@ -552,20 +552,30 @@ async def main() -> None:
 
     # ===== РЕГИСТРАЦИЯ ОБРАБОТЧИКОВ =====
 
-    # Логирование всех callback queries (для отладки)
-    async def log_all_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Логирование ВСЕХ update'ов (для глубокой отладки)
+    async def log_all_updates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        update_type = []
+        if update.message:
+            update_type.append(f"message(text={update.message.text[:30] if update.message.text else 'None'})")
+        if update.callback_query:
+            update_type.append(f"callback_query(data={update.callback_query.data})")
+        if update.edited_message:
+            update_type.append("edited_message")
+
+        logger.info(f"📥 UPDATE получен: {', '.join(update_type) if update_type else 'unknown'}, update_id={update.update_id}")
+
         if update.callback_query:
             query = update.callback_query
             logger.info(
-                f"🔘 CALLBACK QUERY ПОЛУЧЕН! "
+                f"🔘 CALLBACK QUERY ДЕТАЛИ: "
                 f"data={query.data}, "
                 f"from_user={query.from_user.id if query.from_user else None}, "
                 f"message_id={query.message.message_id if query.message else None}"
             )
-            # НЕ вызываем query.answer() здесь - это должны делать основные обработчики
 
-    # Регистрируем в group=-1, чтобы он выполнялся ДО основных обработчиков
-    application.add_handler(CallbackQueryHandler(log_all_callbacks), group=-1)
+    # Регистрируем универсальный обработчик для ВСЕХ update'ов
+    from telegram.ext import TypeHandler
+    application.add_handler(TypeHandler(Update, log_all_updates), group=-10)
 
     # Команды
     application.add_handler(CommandHandler("start", start_command))
