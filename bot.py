@@ -231,11 +231,6 @@ async def prompt_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if stored_target and stored_target.get("display"):
         identity = stored_target["display"]
 
-    admin_state["pending_reply"] = {
-        "user_id": target_user_id,
-        "display": identity,
-    }
-
     prompt_message = await context.bot.send_message(
         chat_id=settings.admin_chat_id,
         text=(
@@ -244,7 +239,11 @@ async def prompt_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         ),
     )
 
-    context.chat_data["pending_reply_prompt_id"] = prompt_message.message_id
+    admin_state["pending_reply"] = {
+        "user_id": target_user_id,
+        "display": identity,
+        "prompt_message_id": prompt_message.message_id,
+    }
 
 
 async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -264,12 +263,18 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     reply_to = message.reply_to_message
     if reply_to is not None:
         target_info = reply_targets.get(reply_to.message_id)
+        logger.debug(
+            "Admin message reply_to=%s, target_info from reply_targets=%s",
+            reply_to.message_id,
+            target_info,
+        )
 
     pending_raw = admin_state.get("pending_reply")
     pending = pending_raw if isinstance(pending_raw, dict) else None
-    prompt_message_id = context.chat_data.get("pending_reply_prompt_id")
+    logger.debug("Pending reply state: %s", pending)
 
     if target_info is None and pending is not None:
+        prompt_message_id = pending.get("prompt_message_id")
         if reply_to is None:
             logger.debug(
                 "Using pending reply for user_id=%s without explicit reply", pending.get("user_id")
@@ -322,7 +327,6 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
     admin_state.pop("pending_reply", None)
-    context.chat_data.pop("pending_reply_prompt_id", None)
     logger.info("Sent reply from admin to user_id=%s", target_user_id)
     await message.reply_text("Сообщение отправлено клиенту")
 
