@@ -197,13 +197,16 @@ async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TY
         [InlineKeyboardButton("📜 История", callback_data=f"history:{user_id}")]
     ])
 
+    logger.info(f"Создаю inline клавиатуру с callback_data: reply:{user_id}, history:{user_id}")
+
     # Отправляем уведомление админу
     if message_type == "text":
-        await context.bot.send_message(
+        msg = await context.bot.send_message(
             chat_id=settings.admin_chat_id,
             text=f"💬 Сообщение от {display_name}\nID: {user_id}\n\n{content}",
             reply_markup=keyboard,
         )
+        logger.info(f"Отправлено сообщение админу с inline кнопками, message_id={msg.message_id}")
     else:
         # Сначала отправляем заголовок
         await context.bot.send_message(
@@ -552,12 +555,16 @@ async def main() -> None:
     # Логирование всех callback queries (для отладки)
     async def log_all_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.callback_query:
+            query = update.callback_query
             logger.info(
-                f"🔘 Callback query получен: "
-                f"data={update.callback_query.data}, "
-                f"from_user={update.callback_query.from_user.id if update.callback_query.from_user else None}"
+                f"🔘 CALLBACK QUERY ПОЛУЧЕН! "
+                f"data={query.data}, "
+                f"from_user={query.from_user.id if query.from_user else None}, "
+                f"message_id={query.message.message_id if query.message else None}"
             )
+            # НЕ вызываем query.answer() здесь - это должны делать основные обработчики
 
+    # Регистрируем в group=-1, чтобы он выполнялся ДО основных обработчиков
     application.add_handler(CallbackQueryHandler(log_all_callbacks), group=-1)
 
     # Команды
