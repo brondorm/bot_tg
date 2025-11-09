@@ -10,7 +10,7 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -73,7 +73,7 @@ db: Optional[Database] = None
 
 
 # ===== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====
-def get_user_info(update: Update) -> tuple[int, Optional[str], Optional[str]]:
+def get_user_info(update: Update) -> Tuple[int, Optional[str], Optional[str]]:
     """Получить информацию о пользователе"""
     if not update.effective_user:
         raise RuntimeError("Пользователь не найден")
