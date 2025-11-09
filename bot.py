@@ -321,6 +321,17 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         content=reply_text,
     )
 
+    # Delete the prompt message after successfully sending the reply
+    if prompt_message_id is not None:
+        try:
+            await context.bot.delete_message(
+                chat_id=settings.admin_chat_id,
+                message_id=prompt_message_id
+            )
+            logger.debug("Deleted prompt message id=%s", prompt_message_id)
+        except Exception:
+            logger.debug("Could not delete prompt message id=%s", prompt_message_id, exc_info=True)
+
     admin_state.pop("pending_reply", None)
     context.chat_data.pop("pending_reply_prompt_id", None)
     logger.info("Sent reply from admin to user_id=%s", target_user_id)
