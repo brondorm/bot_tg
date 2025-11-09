@@ -1,22 +1,33 @@
-from __future__ import annotations
+#!/usr/bin/env python3
+"""
+Telegram Bot для общения с клиентами
+Переписанная версия с улучшенной логикой
+"""
 
 import asyncio
 import html
 import logging
 import os
-from pathlib import Path
 from dataclasses import dataclass
-from typing import Any, Optional
+from pathlib import Path
+from typing import Optional
 
 from dotenv import load_dotenv
-from telegram import (InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton,
-                      ReplyKeyboardMarkup, Update)
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
-from telegram.ext import (Application, ApplicationBuilder, CallbackQueryHandler,
-                          CommandHandler, ContextTypes, MessageHandler, filters)
+from telegram.ext import (
+    Application,
+    ApplicationBuilder,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 from database import Database
 
+# ===== НАСТРОЙКА ЛОГИРОВАНИЯ =====
 log_handlers = [logging.StreamHandler()]
 log_file = os.getenv("LOG_FILE")
 if log_file:
@@ -33,69 +44,77 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# ===== НАСТРОЙКИ =====
 @dataclass
 class Settings:
+    """Настройки бота"""
     token: str
     admin_chat_id: int
     database_path: str = "data/bot.db"
 
     @classmethod
     def load(cls) -> "Settings":
+        """Загрузка настроек из переменных окружения"""
         load_dotenv()
         token = os.getenv("BOT_TOKEN")
         admin_chat_id = os.getenv("ADMIN_CHAT_ID")
 
         if not token:
-            raise RuntimeError("BOT_TOKEN is not set")
+            raise RuntimeError("BOT_TOKEN не установлен в .env файле")
         if not admin_chat_id:
-            raise RuntimeError("ADMIN_CHAT_ID is not set")
+            raise RuntimeError("ADMIN_CHAT_ID не установлен в .env файле")
 
         return cls(token=token, admin_chat_id=int(admin_chat_id))
 
 
-db: Optional[Database] = None
+# Глобальные переменные
 settings: Optional[Settings] = None
-
-ADMIN_KEYBOARD = ReplyKeyboardMarkup(
-    [[KeyboardButton("Клиенты"), KeyboardButton("История")], [KeyboardButton("Меню")]],
-    resize_keyboard=True,
-)
+db: Optional[Database] = None
 
 
-def get_user_display(update: Update) -> tuple[int, Optional[str], Optional[str]]:
-    assert update.effective_user is not None
+# ===== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====
+def get_user_info(update: Update) -> tuple[int, Optional[str], Optional[str]]:
+    """Получить информацию о пользователе"""
+    if not update.effective_user:
+        raise RuntimeError("Пользователь не найден")
+
     user = update.effective_user
-    full_name = " ".join(filter(None, [user.first_name, user.last_name])) or None
+    user_id = user.id
     username = user.username
-    return user.id, username, full_name
+    full_name = " ".join(filter(None, [user.first_name, user.last_name])) or None
+
+    return user_id, username, full_name
 
 
-def get_admin_state(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
-    if settings is None:
-        raise RuntimeError("Settings not loaded")
-    admin_states = context.bot_data.setdefault("admin_states", {})
-    state = admin_states.setdefault(settings.admin_chat_id, {})
-    return state
+def get_user_display_name(user_id: int, username: Optional[str], full_name: Optional[str]) -> str:
+    """Получить отображаемое имя пользователя"""
+    if full_name:
+        return full_name
+    elif username:
+        return f"@{username}"
+    else:
+        return f"ID: {user_id}"
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if db is None:
-        raise RuntimeError("Database not initialized")
-    if settings is None:
-        raise RuntimeError("Settings not loaded")
-    message = update.message
-    if message is None:
+# ===== ОБРАБОТЧИКИ КЛИЕНТСКИХ СООБЩЕНИЙ =====
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик команды /start от клиента"""
+    if not update.message or not settings or not db:
         return
 
-    user_id, username, full_name = get_user_display(update)
+    user_id, username, full_name = get_user_info(update)
 
+    # Если это админ, просто приветствуем
     if update.effective_chat and update.effective_chat.id == settings.admin_chat_id:
-        await message.reply_text(
-            "Админ-меню:",
-            reply_markup=ADMIN_KEYBOARD,
+        await update.message.reply_text(
+            "👋 Привет, Админ!\n\n"
+            "Доступные команды:\n"
+            "/clients - Список клиентов\n"
+            "/history <user_id> - История с клиентом"
         )
         return
 
+    # Сохраняем в базу
     db.add_message(
         user_id=user_id,
         username=username,
@@ -104,44 +123,61 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message_type="command",
         content="/start",
     )
-    await message.reply_text(
-        "Здравствуйте! Напишите ваш вопрос, и я скоро отвечу."
+
+    # Отвечаем клиенту
+    await update.message.reply_text(
+        "👋 Здравствуйте!\n\n"
+        "Я бот для связи с поддержкой. Напишите ваш вопрос, "
+        "и я передам его оператору. Скоро вам ответят!"
+    )
+
+    # Уведомляем админа
+    display_name = get_user_display_name(user_id, username, full_name)
+    await context.bot.send_message(
+        chat_id=settings.admin_chat_id,
+        text=f"🆕 Новый пользователь: {display_name} (ID: {user_id})\nОтправил команду /start",
     )
 
 
 async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    global settings, db
-    if settings is None:
-        raise RuntimeError("Settings not loaded")
-    if db is None:
-        raise RuntimeError("Database not initialized")
-
-    message = update.effective_message
-    if message is None:
+    """Обработчик сообщений от клиентов"""
+    if not update.message or not settings or not db:
         return
 
+    # Игнорируем сообщения от админа
     if update.effective_chat and update.effective_chat.id == settings.admin_chat_id:
         return
 
-    user_id, username, full_name = get_user_display(update)
-    content = message.text or message.caption
+    user_id, username, full_name = get_user_info(update)
+    message = update.message
 
-    if message.photo:
-        file_id = message.photo[-1].file_id
-        message_type = "photo"
-    elif message.document:
-        file_id = message.document.file_id
-        message_type = "document"
-    elif message.voice:
-        file_id = message.voice.file_id
-        message_type = "voice"
-    elif message.text:
-        file_id = None
+    # Определяем тип сообщения
+    if message.text:
+        content = message.text
         message_type = "text"
-    else:
         file_id = None
+    elif message.photo:
+        content = message.caption
+        message_type = "photo"
+        file_id = message.photo[-1].file_id
+    elif message.document:
+        content = message.caption
+        message_type = "document"
+        file_id = message.document.file_id
+    elif message.voice:
+        content = None
+        message_type = "voice"
+        file_id = message.voice.file_id
+    elif message.video:
+        content = message.caption
+        message_type = "video"
+        file_id = message.video.file_id
+    else:
+        content = None
         message_type = "unknown"
+        file_id = None
 
+    # Сохраняем в базу
     db.add_message(
         user_id=user_id,
         username=username,
@@ -152,414 +188,359 @@ async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TY
         file_id=file_id,
     )
 
-    display_name = full_name or username or str(user_id)
-    prefix = f"Новое сообщение от {display_name} (ID: {user_id}):"
-    reply_keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("Ответить", callback_data=f"reply:{user_id}")]]
-    )
+    # Формируем уведомление для админа
+    display_name = get_user_display_name(user_id, username, full_name)
 
-    forwarded = None
+    # Создаем кнопку "Ответить"
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✉️ Ответить", callback_data=f"reply:{user_id}")],
+        [InlineKeyboardButton("📜 История", callback_data=f"history:{user_id}")]
+    ])
+
+    # Отправляем уведомление админу
     if message_type == "text":
-        notification = await context.bot.send_message(
+        await context.bot.send_message(
             chat_id=settings.admin_chat_id,
-            text=f"{prefix}\n{message.text}",
-            reply_markup=reply_keyboard,
+            text=f"💬 Сообщение от {display_name}\nID: {user_id}\n\n{content}",
+            reply_markup=keyboard,
         )
     else:
-        notification = await context.bot.send_message(
+        # Сначала отправляем заголовок
+        await context.bot.send_message(
             chat_id=settings.admin_chat_id,
-            text=f"{prefix}\nТип: {message_type}",
-            reply_markup=reply_keyboard,
+            text=f"💬 Сообщение от {display_name}\nID: {user_id}\nТип: {message_type}",
+            reply_markup=keyboard,
         )
+
+        # Затем пересылаем само сообщение
         try:
-            forwarded = await context.bot.copy_message(
+            await context.bot.copy_message(
                 chat_id=settings.admin_chat_id,
                 from_chat_id=message.chat_id,
                 message_id=message.message_id,
             )
-        except Exception:
-            logger.exception("Failed to copy client message to admin chat")
+        except Exception as e:
+            logger.error(f"Не удалось переслать медиа: {e}")
 
-    admin_state = get_admin_state(context)
-    reply_targets = admin_state.setdefault("reply_targets", {})
-    reply_targets[notification.message_id] = {
-        "user_id": user_id,
-        "display": display_name,
-    }
-
-    if forwarded is not None:
-        reply_targets[forwarded.message_id] = {
-            "user_id": user_id,
-            "display": display_name,
-        }
+    logger.info(f"Получено сообщение от клиента {user_id} ({message_type})")
 
 
-async def prompt_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if settings is None:
-        raise RuntimeError("Settings not loaded")
+# ===== ОБРАБОТЧИКИ КНОПОК =====
+async def button_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Обработчик нажатия кнопки "Ответить"
+    Показывает приглашение написать ответ
+    """
+    if not update.callback_query or not settings:
+        return
+
     query = update.callback_query
-    if query is None or query.message is None:
-        return
-    logger.debug(
-        "Prompt reply callback from user_id=%s chat_id=%s data=%r message_id=%s",
-        query.from_user.id if query.from_user else None,
-        query.message.chat.id,
-        query.data,
-        query.message.message_id,
-    )
-    _, _, user_id_str = query.data.partition(":") if query.data else ("", "", "")
-    if not user_id_str.isdigit():
-        await query.answer(text="Не удалось определить пользователя", show_alert=True)
+    await query.answer()
+
+    # Извлекаем user_id из callback_data
+    callback_data = query.data or ""
+    if not callback_data.startswith("reply:"):
         return
 
-    target_user_id = int(user_id_str)
-    await query.answer("Введите сообщение в админ-чате")
+    try:
+        user_id = int(callback_data.split(":")[1])
+    except (ValueError, IndexError):
+        await query.answer("❌ Ошибка: неверный ID пользователя", show_alert=True)
+        return
 
-    logger.info("Reply requested for user_id=%s via message_id=%s", target_user_id, query.message.message_id)
-
-    # Remove inline buttons so the admin sees that the request is handled and
-    # prevent repeated presses that confuse the reply UI.
+    # Убираем кнопки с исходного сообщения
     try:
         await query.edit_message_reply_markup(reply_markup=None)
     except Exception:
-        logger.debug("Could not remove inline keyboard for reply prompt", exc_info=True)
+        pass
 
-    admin_state = get_admin_state(context)
-    reply_targets = admin_state.setdefault("reply_targets", {})
-    identity = str(target_user_id)
-    stored_target = reply_targets.get(query.message.message_id)
-    if stored_target and stored_target.get("display"):
-        identity = stored_target["display"]
+    # Отправляем приглашающее сообщение
+    prompt_msg = await context.bot.send_message(
+        chat_id=settings.admin_chat_id,
+        text=f"✍️ Ответ для клиента ID: {user_id}\n\n"
+             "Напишите следующее текстовое сообщение в этом чате, "
+             "чтобы отправить его клиенту.",
+    )
 
-    admin_state["pending_reply"] = {
-        "user_id": target_user_id,
-        "display": identity,
+    # Сохраняем информацию о том, что ждём ответ для этого клиента
+    if "pending_replies" not in context.bot_data:
+        context.bot_data["pending_replies"] = {}
+
+    context.bot_data["pending_replies"][settings.admin_chat_id] = {
+        "user_id": user_id,
+        "prompt_message_id": prompt_msg.message_id,
     }
 
-    prompt_message = await context.bot.send_message(
+    logger.info(f"Админ начал отвечать клиенту {user_id}")
+
+
+async def button_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик нажатия кнопки "История" """
+    if not update.callback_query or not settings or not db:
+        return
+
+    query = update.callback_query
+    await query.answer()
+
+    # Извлекаем user_id из callback_data
+    callback_data = query.data or ""
+    if not callback_data.startswith("history:"):
+        return
+
+    try:
+        user_id = int(callback_data.split(":")[1])
+    except (ValueError, IndexError):
+        await query.answer("❌ Ошибка: неверный ID пользователя", show_alert=True)
+        return
+
+    # Получаем историю
+    history = db.get_history(user_id, limit=20)
+
+    if not history:
+        await context.bot.send_message(
+            chat_id=settings.admin_chat_id,
+            text=f"📜 История с клиентом {user_id}\n\nИстория пуста.",
+        )
+        return
+
+    # Формируем текст истории
+    lines = [f"📜 <b>История с клиентом {user_id}</b>", ""]
+
+    for direction, msg_type, content, created_at in history:
+        author = "👤 Клиент" if direction == "from_client" else "👨‍💼 Вы"
+
+        if msg_type in {"text", "command"}:
+            text = content or ""
+        else:
+            text = f"[{msg_type}] {content or ''}"
+
+        lines.append(
+            f"{created_at}\n{author}: {html.escape(text)}\n"
+        )
+
+    history_text = "\n".join(lines)
+
+    await context.bot.send_message(
         chat_id=settings.admin_chat_id,
-        text=(
-            f"Ответ для клиента {identity} (ID: {target_user_id}).\n"
-            "Напишите следующее текстовое сообщение в этом чате, чтобы отправить его клиенту."
-        ),
+        text=history_text,
+        parse_mode=ParseMode.HTML,
     )
 
-    context.chat_data["pending_reply_prompt_id"] = prompt_message.message_id
+    logger.info(f"Показана история для клиента {user_id}")
 
 
-async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if settings is None or db is None:
-        raise RuntimeError("Settings or database not initialized")
-    message = update.effective_message
-    if message is None or update.effective_chat is None:
-        return
-    if update.effective_chat.id != settings.admin_chat_id:
+# ===== ОБРАБОТЧИКИ СООБЩЕНИЙ АДМИНА =====
+async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик текстовых сообщений от админа (ответы клиентам)"""
+    if not update.message or not settings or not db:
         return
 
-    admin_state = get_admin_state(context)
-    reply_targets = admin_state.get("reply_targets", {})
-
-    target_info: Optional[dict[str, object]] = None
-
-    reply_to = message.reply_to_message
-    if reply_to is not None:
-        target_info = reply_targets.get(reply_to.message_id)
-
-    pending_raw = admin_state.get("pending_reply")
-    pending = pending_raw if isinstance(pending_raw, dict) else None
-    prompt_message_id = context.chat_data.get("pending_reply_prompt_id")
-
-    if target_info is None and pending is not None:
-        if reply_to is None:
-            logger.debug(
-                "Using pending reply for user_id=%s without explicit reply", pending.get("user_id")
-            )
-            target_info = pending
-        elif prompt_message_id is not None and reply_to.message_id == prompt_message_id:
-            logger.debug(
-                "Using pending reply for user_id=%s via prompt reply", pending.get("user_id")
-            )
-            target_info = pending
-
-    if not target_info:
-        logger.debug(
-            "Ignoring admin message id=%s: no reply target found (reply_to=%s, pending=%s)",
-            message.message_id,
-            reply_to.message_id if reply_to else None,
-            bool(pending),
-        )
+    # Проверяем, что это сообщение от админа
+    if update.effective_chat and update.effective_chat.id != settings.admin_chat_id:
         return
 
-    target_user_id = target_info.get("user_id")
-    if not isinstance(target_user_id, int):
-        logger.warning(
-            "Reply target missing numeric user_id. target_info=%s", target_info
-        )
+    # Проверяем, есть ли ожидающий ответ
+    if "pending_replies" not in context.bot_data:
         return
 
-    reply_text = message.text
+    pending = context.bot_data["pending_replies"].get(settings.admin_chat_id)
+    if not pending:
+        return
+
+    user_id = pending["user_id"]
+    prompt_message_id = pending["prompt_message_id"]
+
+    # Получаем текст ответа
+    reply_text = update.message.text
     if not reply_text:
-        await message.reply_text("Ответ должен содержать текст")
+        await update.message.reply_text("❌ Ответ должен содержать текст")
         return
 
-    service_commands = {"Клиенты", "История", "Меню"}
-    if reply_text in service_commands:
-        logger.debug("Admin message matches service command '%s', ignoring", reply_text)
-        return
-    if reply_text.startswith("/"):
-        logger.debug("Admin message '%s' starts with '/', ignoring", reply_text)
-        return
+    try:
+        # Отправляем сообщение клиенту
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=reply_text,
+        )
 
-    await context.bot.send_message(chat_id=target_user_id, text=reply_text)
+        # Сохраняем в базу
+        db.add_message(
+            user_id=user_id,
+            username=None,
+            full_name=None,
+            direction="from_admin",
+            message_type="text",
+            content=reply_text,
+        )
 
-    db.add_message(
-        user_id=target_user_id,
-        username=None,
-        full_name=None,
-        direction="from_admin",
-        message_type="text",
-        content=reply_text,
-    )
-
-    # Delete the prompt message after successfully sending the reply
-    if prompt_message_id is not None:
+        # Удаляем приглашающее сообщение
         try:
             await context.bot.delete_message(
                 chat_id=settings.admin_chat_id,
-                message_id=prompt_message_id
+                message_id=prompt_message_id,
             )
-            logger.debug("Deleted prompt message id=%s", prompt_message_id)
-        except Exception:
-            logger.debug("Could not delete prompt message id=%s", prompt_message_id, exc_info=True)
+        except Exception as e:
+            logger.debug(f"Не удалось удалить приглашение: {e}")
 
-    admin_state.pop("pending_reply", None)
-    context.chat_data.pop("pending_reply_prompt_id", None)
-    logger.info("Sent reply from admin to user_id=%s", target_user_id)
-    await message.reply_text("Сообщение отправлено клиенту")
-
-
-async def reply_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    global settings, db
-    if settings is None:
-        raise RuntimeError("Settings not loaded")
-    if db is None:
-        raise RuntimeError("Database not initialized")
-
-    if update.effective_chat is None or update.effective_chat.id != settings.admin_chat_id:
-        return
-
-    if not context.args or len(context.args) < 2:
+        # Показываем подтверждение
         await update.message.reply_text(
-            "Использование: /reply <user_id> <текст ответа>"
+            f"✅ Сообщение отправлено клиенту {user_id}"
         )
-        return
 
-    try:
-        target_user_id = int(context.args[0])
-    except ValueError:
-        await update.message.reply_text("ID пользователя должен быть числом")
-        return
+        # Очищаем состояние
+        del context.bot_data["pending_replies"][settings.admin_chat_id]
 
-    reply_text = " ".join(context.args[1:])
-    await context.bot.send_message(chat_id=target_user_id, text=reply_text)
+        logger.info(f"Админ отправил ответ клиенту {user_id}")
 
-    db.add_message(
-        user_id=target_user_id,
-        username=None,
-        full_name=None,
-        direction="from_admin",
-        message_type="text",
-        content=reply_text,
-    )
-
-    await update.message.reply_text("Сообщение отправлено клиенту")
-
-
-def format_history_entries(history: list[tuple[str, str, Optional[str], str]], user_id: int) -> str:
-    if not history:
-        return "История пуста"
-
-    header = (
-        f"<b>История переписки с {html.escape(str(user_id))} "
-        f"(последние {len(history)}):</b>"
-    )
-    lines = [header]
-    for direction, message_type, body, created_at in history:
-        author = "Клиент" if direction == "from_client" else "Вы"
-        if message_type in {"text", "command"}:
-            content = body or ""
-        else:
-            content = f"[{message_type}] {body or ''}"
-
-        line = (
-            f"{html.escape(created_at)} — {html.escape(author)}: "
-            f"{html.escape(content)}"
+    except Exception as e:
+        logger.error(f"Ошибка отправки сообщения клиенту: {e}")
+        await update.message.reply_text(
+            f"❌ Ошибка отправки сообщения: {e}"
         )
-        lines.append(line)
-
-    return "\n".join(lines)
 
 
+# ===== КОМАНДЫ АДМИНА =====
 async def clients_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    global settings, db
-    if settings is None:
-        raise RuntimeError("Settings not loaded")
-    if db is None:
-        raise RuntimeError("Database not initialized")
+    """Команда /clients - показать список клиентов"""
+    if not update.message or not settings or not db:
+        return
 
-    if update.effective_chat is None or update.effective_chat.id != settings.admin_chat_id:
+    # Проверяем, что команда от админа
+    if update.effective_chat and update.effective_chat.id != settings.admin_chat_id:
         return
 
     clients = db.list_clients()
-    logger.info("Fetched %s clients for admin listing", len(clients))
+
     if not clients:
-        await update.message.reply_text("Клиентов пока нет")
+        await update.message.reply_text("📋 Клиентов пока нет")
         return
 
-    lines = ["Клиенты:"]
-    keyboard_buttons = []
-    for user_id, username, full_name, last_message in clients[:10]:
-        identity = full_name or (f"@{username}" if username else str(user_id))
-        details: list[str] = []
-        if username and identity != f"@{username}":
-            details.append(f"@{username}")
-        details.append(f"ID: {user_id}")
-        details_text = f" ({', '.join(details)})" if details else ""
+    # Формируем список клиентов
+    lines = ["👥 <b>Список клиентов:</b>\n"]
+    keyboard = []
+
+    for user_id, username, full_name, last_message in clients[:20]:
+        display_name = get_user_display_name(user_id, username, full_name)
         lines.append(
-            f"• {identity}{details_text} — последний контакт: {last_message}"
-        )
-        keyboard_buttons.append(
-            [InlineKeyboardButton(identity, callback_data=f"history:{user_id}")]
+            f"• {html.escape(display_name)}\n"
+            f"  ID: {user_id}\n"
+            f"  Последнее сообщение: {last_message}\n"
         )
 
-    reply_markup = InlineKeyboardMarkup(keyboard_buttons) if keyboard_buttons else None
+        # Добавляем кнопки для быстрого доступа
+        keyboard.append([
+            InlineKeyboardButton(
+                f"💬 {display_name}",
+                callback_data=f"history:{user_id}"
+            )
+        ])
 
-    await update.message.reply_text("\n".join(lines), reply_markup=reply_markup)
+    reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode=ParseMode.HTML,
+        reply_markup=reply_markup,
+    )
+
+    logger.info(f"Показан список из {len(clients)} клиентов")
 
 
 async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    global settings, db
-    if settings is None:
-        raise RuntimeError("Settings not loaded")
-    if db is None:
-        raise RuntimeError("Database not initialized")
-
-    if update.effective_chat is None or update.effective_chat.id != settings.admin_chat_id:
+    """Команда /history <user_id> - показать историю с клиентом"""
+    if not update.message or not settings or not db:
         return
 
+    # Проверяем, что команда от админа
+    if update.effective_chat and update.effective_chat.id != settings.admin_chat_id:
+        return
+
+    # Проверяем аргументы
     if not context.args:
         await update.message.reply_text(
-            "Использование: /history <user_id> [количество сообщений]"
+            "❌ Использование: /history <user_id> [лимит]\n"
+            "Пример: /history 123456789 50"
         )
         return
 
     try:
-        target_user_id = int(context.args[0])
+        user_id = int(context.args[0])
     except ValueError:
-        await update.message.reply_text("ID пользователя должен быть числом")
+        await update.message.reply_text("❌ ID пользователя должен быть числом")
         return
 
+    # Получаем лимит (по умолчанию 20)
     limit = 20
     if len(context.args) >= 2:
         try:
             limit = max(1, min(100, int(context.args[1])))
         except ValueError:
-            await update.message.reply_text("Некорректное количество сообщений")
-            return
+            pass
 
-    history = db.get_history(target_user_id, limit)
+    # Получаем историю
+    history = db.get_history(user_id, limit)
+
     if not history:
-        await update.message.reply_text("История пуста")
+        await update.message.reply_text(
+            f"📜 История с клиентом {user_id}\n\nИстория пуста."
+        )
         return
 
-    await update.message.reply_text(
-        format_history_entries(history, target_user_id),
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
-    )
+    # Формируем текст истории
+    lines = [f"📜 <b>История с клиентом {user_id}</b> (последние {len(history)})", ""]
 
+    for direction, msg_type, content, created_at in history:
+        author = "👤 Клиент" if direction == "from_client" else "👨‍💼 Вы"
 
-async def show_history_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if settings is None or db is None:
-        raise RuntimeError("Settings or database not initialized")
-    query = update.callback_query
-    if query is None or query.message is None:
-        return
-    logger.debug(
-        "History callback from user_id=%s chat_id=%s data=%r message_id=%s",
-        query.from_user.id if query.from_user else None,
-        query.message.chat.id,
-        query.data,
-        query.message.message_id,
-    )
-    if query.message.chat.id != settings.admin_chat_id:
-        await query.answer()
-        return
+        if msg_type in {"text", "command"}:
+            text = content or ""
+        else:
+            text = f"[{msg_type}] {content or ''}"
 
-    data = query.data or ""
-    _, _, user_id_str = data.partition(":")
-    if not user_id_str.isdigit():
-        await query.answer(text="Некорректный идентификатор", show_alert=True)
-        return
-
-    target_user_id = int(user_id_str)
-    history = db.get_history(target_user_id, 20)
-    text = format_history_entries(history, target_user_id)
-    await query.answer()
-    await query.message.reply_text(
-        text,
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
-    )
-
-
-async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if settings is None:
-        raise RuntimeError("Settings not loaded")
-    if update.effective_chat is None or update.effective_chat.id != settings.admin_chat_id:
-        return
-
-    await update.message.reply_text(
-        "Доступные действия:\n"
-        "• Клиенты — показать последних собеседников\n"
-        "• История — запросить историю по ID\n"
-        "• Меню — показать эту подсказку",
-        reply_markup=ADMIN_KEYBOARD,
-    )
-
-
-async def main() -> None:
-    global settings, db
-    settings = Settings.load()
-    db = Database(settings.database_path)
-
-    application: Application = ApplicationBuilder().token(settings.token).build()
-
-    async def log_button_press(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        query = update.callback_query
-        if query is None:
-            return
-        logger.info(
-            "Button pressed: user_id=%s chat_id=%s data=%r inline_message_id=%s",
-            query.from_user.id if query.from_user else None,
-            query.message.chat.id if query.message else None,
-            query.data,
-            query.inline_message_id,
+        lines.append(
+            f"{created_at}\n{author}: {html.escape(text)}\n"
         )
 
-    application.add_handler(
-        CallbackQueryHandler(log_button_press, block=False)
+    history_text = "\n".join(lines)
+
+    await update.message.reply_text(
+        history_text,
+        parse_mode=ParseMode.HTML,
     )
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("reply", reply_command))
+    logger.info(f"Показана история для клиента {user_id} ({len(history)} сообщений)")
+
+
+# ===== ГЛАВНАЯ ФУНКЦИЯ =====
+async def main() -> None:
+    """Главная функция запуска бота"""
+    global settings, db
+
+    # Загружаем настройки
+    settings = Settings.load()
+
+    # Инициализируем базу данных
+    db = Database(settings.database_path)
+
+    logger.info("✅ Настройки загружены")
+    logger.info(f"✅ База данных: {settings.database_path}")
+    logger.info(f"✅ Админ ID: {settings.admin_chat_id}")
+
+    # Создаем приложение
+    application = ApplicationBuilder().token(settings.token).build()
+
+    # ===== РЕГИСТРАЦИЯ ОБРАБОТЧИКОВ =====
+
+    # Команды
+    application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("clients", clients_command))
     application.add_handler(CommandHandler("history", history_command))
-    application.add_handler(CommandHandler("menu", menu_command))
 
-    application.add_handler(CallbackQueryHandler(prompt_reply, pattern=r"^reply:"))
-    application.add_handler(CallbackQueryHandler(show_history_callback, pattern=r"^history:"))
+    # Кнопки (callback queries)
+    application.add_handler(CallbackQueryHandler(button_reply, pattern=r"^reply:"))
+    application.add_handler(CallbackQueryHandler(button_history, pattern=r"^history:"))
 
+    # Сообщения от клиентов (не от админа, не команды)
     application.add_handler(
         MessageHandler(
             filters.ALL
@@ -569,40 +550,22 @@ async def main() -> None:
         )
     )
 
-    application.add_handler(
-        MessageHandler(
-            filters.Chat(settings.admin_chat_id)
-            & filters.Regex("^Клиенты$"),
-            clients_command,
-        )
-    )
-    application.add_handler(
-        MessageHandler(
-            filters.Chat(settings.admin_chat_id)
-            & filters.Regex("^История$"),
-            history_command,
-        )
-    )
-    application.add_handler(
-        MessageHandler(
-            filters.Chat(settings.admin_chat_id)
-            & filters.Regex("^Меню$"),
-            menu_command,
-        )
-    )
-
+    # Сообщения от админа (ответы клиентам)
     application.add_handler(
         MessageHandler(
             filters.Chat(settings.admin_chat_id)
             & filters.TEXT
             & (~filters.COMMAND),
-            handle_admin_reply,
+            handle_admin_message,
         )
     )
 
-    logger.info("Bot started")
+    # Запускаем бота
+    logger.info("🚀 Бот запущен и готов к работе!")
+
     await application.initialize()
     await application.start()
+
     try:
         await application.updater.start_polling()
         await asyncio.Event().wait()
@@ -616,4 +579,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        logger.info("Bot stopped")
+        logger.info("👋 Бот остановлен")
