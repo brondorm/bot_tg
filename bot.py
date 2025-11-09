@@ -231,22 +231,31 @@ async def button_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     Обработчик нажатия кнопки "Ответить"
     Показывает приглашение написать ответ
     """
+    logger.info("button_reply вызвана")
+
     if not update.callback_query or not settings:
+        logger.warning("button_reply: нет callback_query или settings")
         return
 
     query = update.callback_query
-    await query.answer()
+    logger.info(f"button_reply: callback_data = {query.data}")
 
     # Извлекаем user_id из callback_data
     callback_data = query.data or ""
     if not callback_data.startswith("reply:"):
+        logger.warning(f"button_reply: неверный callback_data: {callback_data}")
+        await query.answer()
         return
 
     try:
         user_id = int(callback_data.split(":")[1])
-    except (ValueError, IndexError):
+        logger.info(f"button_reply: user_id = {user_id}")
+    except (ValueError, IndexError) as e:
+        logger.error(f"button_reply: ошибка парсинга user_id: {e}")
         await query.answer("❌ Ошибка: неверный ID пользователя", show_alert=True)
         return
+
+    await query.answer()
 
     # Убираем кнопки с исходного сообщения
     try:
@@ -276,22 +285,31 @@ async def button_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def button_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик нажатия кнопки "История" """
+    logger.info("button_history вызвана")
+
     if not update.callback_query or not settings or not db:
+        logger.warning("button_history: нет callback_query, settings или db")
         return
 
     query = update.callback_query
-    await query.answer()
+    logger.info(f"button_history: callback_data = {query.data}")
 
     # Извлекаем user_id из callback_data
     callback_data = query.data or ""
     if not callback_data.startswith("history:"):
+        logger.warning(f"button_history: неверный callback_data: {callback_data}")
+        await query.answer()
         return
 
     try:
         user_id = int(callback_data.split(":")[1])
-    except (ValueError, IndexError):
+        logger.info(f"button_history: user_id = {user_id}")
+    except (ValueError, IndexError) as e:
+        logger.error(f"button_history: ошибка парсинга user_id: {e}")
         await query.answer("❌ Ошибка: неверный ID пользователя", show_alert=True)
         return
+
+    await query.answer()
 
     # Получаем историю
     history = db.get_history(user_id, limit=20)
@@ -530,6 +548,17 @@ async def main() -> None:
     application = ApplicationBuilder().token(settings.token).build()
 
     # ===== РЕГИСТРАЦИЯ ОБРАБОТЧИКОВ =====
+
+    # Логирование всех callback queries (для отладки)
+    async def log_all_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.callback_query:
+            logger.info(
+                f"🔘 Callback query получен: "
+                f"data={update.callback_query.data}, "
+                f"from_user={update.callback_query.from_user.id if update.callback_query.from_user else None}"
+            )
+
+    application.add_handler(CallbackQueryHandler(log_all_callbacks), group=-1)
 
     # Команды
     application.add_handler(CommandHandler("start", start_command))
