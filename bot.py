@@ -233,10 +233,7 @@ async def prompt_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     prompt_message = await context.bot.send_message(
         chat_id=settings.admin_chat_id,
-        text=(
-            f"Ответ для клиента {identity} (ID: {target_user_id}).\n"
-            "Напишите следующее текстовое сообщение в этом чате, чтобы отправить его клиенту."
-        ),
+        text=f"Напишите сообщение клиенту {identity} (ID: {target_user_id})",
     )
 
     admin_state["pending_reply"] = {
@@ -325,6 +322,17 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         message_type="text",
         content=reply_text,
     )
+
+    # Delete the prompt message after sending reply
+    prompt_message_id = pending.get("prompt_message_id") if pending else None
+    if prompt_message_id:
+        try:
+            await context.bot.delete_message(
+                chat_id=settings.admin_chat_id,
+                message_id=prompt_message_id
+            )
+        except Exception:
+            logger.debug("Could not delete prompt message", exc_info=True)
 
     admin_state.pop("pending_reply", None)
     logger.info("Sent reply from admin to user_id=%s", target_user_id)
