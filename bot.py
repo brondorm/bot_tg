@@ -536,27 +536,27 @@ async def main() -> None:
     application.add_handler(CommandHandler("clients", clients_command))
     application.add_handler(CommandHandler("history", history_command))
 
-    # Кнопки (callback queries)
+    # Кнопки (callback queries) - ПЕРВЫМИ!
     application.add_handler(CallbackQueryHandler(button_reply, pattern=r"^reply:"))
     application.add_handler(CallbackQueryHandler(button_history, pattern=r"^history:"))
 
-    # Сообщения от клиентов (не от админа, не команды)
-    application.add_handler(
-        MessageHandler(
-            filters.ALL
-            & (~filters.COMMAND)
-            & (~filters.Chat(settings.admin_chat_id)),
-            handle_client_message,
-        )
-    )
-
-    # Сообщения от админа (ответы клиентам)
+    # Сообщения от админа (ответы клиентам) - более специфичный фильтр идёт раньше
     application.add_handler(
         MessageHandler(
             filters.Chat(settings.admin_chat_id)
             & filters.TEXT
             & (~filters.COMMAND),
             handle_admin_message,
+        )
+    )
+
+    # Сообщения от клиентов В ПОСЛЕДНЮЮ ОЧЕРЕДЬ - используем конкретные типы вместо ALL
+    application.add_handler(
+        MessageHandler(
+            (filters.TEXT | filters.PHOTO | filters.DOCUMENT | filters.VOICE | filters.VIDEO)
+            & (~filters.COMMAND)
+            & (~filters.Chat(settings.admin_chat_id)),
+            handle_client_message,
         )
     )
 
