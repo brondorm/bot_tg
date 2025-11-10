@@ -553,7 +553,7 @@ async def main() -> None:
     # Сообщения от клиентов В ПОСЛЕДНЮЮ ОЧЕРЕДЬ - используем конкретные типы вместо ALL
     application.add_handler(
         MessageHandler(
-            (filters.TEXT | filters.PHOTO | filters.DOCUMENT | filters.VOICE | filters.VIDEO)
+            (filters.TEXT | filters.PHOTO | filters.Document.ALL | filters.VOICE | filters.VIDEO)
             & (~filters.COMMAND)
             & (~filters.Chat(settings.admin_chat_id)),
             handle_client_message,
