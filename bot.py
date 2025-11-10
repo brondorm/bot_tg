@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Telegram Bot для общения с клиентами
-Переписанная версия с улучшенной логикой
+Версия на aiogram 3.x
 """
 
 import asyncio
@@ -12,18 +12,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from dotenv import load_dotenv
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.constants import ParseMode
-from telegram.ext import (
-    Application,
-    ApplicationBuilder,
-    CallbackQueryHandler,
-    CommandHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
+from aiogram import Bot, Dispatcher, F, Router
+from aiogram.filters import Command, CommandStart
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
 )
+from aiogram.enums import ParseMode
+from dotenv import load_dotenv
 
 from database import Database
 
@@ -70,15 +68,22 @@ class Settings:
 # Глобальные переменные
 settings: Optional[Settings] = None
 db: Optional[Database] = None
+bot: Optional[Bot] = None
+
+# Словарь для отслеживания ожидающих ответов (user_id -> prompt_message_id)
+pending_replies: dict[int, int] = {}
+
+# Роутер для всех обработчиков
+router = Router()
 
 
 # ===== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====
-def get_user_info(update: Update) -> tuple[int, Optional[str], Optional[str]]:
+def get_user_info(message: Message) -> tuple[int, Optional[str], Optional[str]]:
     """Получить информацию о пользователе"""
-    if not update.effective_user:
+    if not message.from_user:
         raise RuntimeError("Пользователь не найден")
 
-    user = update.effective_user
+    user = message.from_user
     user_id = user.id
     username = user.username
     full_name = " ".join(filter(None, [user.first_name, user.last_name])) or None
@@ -97,16 +102,17 @@ def get_user_display_name(user_id: int, username: Optional[str], full_name: Opti
 
 
 # ===== ОБРАБОТЧИКИ КЛИЕНТСКИХ СООБЩЕНИЙ =====
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+@router.message(CommandStart())
+async def start_command(message: Message) -> None:
     """Обработчик команды /start от клиента"""
-    if not update.message or not settings or not db:
+    if not message.from_user or not settings or not db or not bot:
         return
 
-    user_id, username, full_name = get_user_info(update)
+    user_id, username, full_name = get_user_info(message)
 
     # Если это админ, просто приветствуем
-    if update.effective_chat and update.effective_chat.id == settings.admin_chat_id:
-        await update.message.reply_text(
+    if message.chat.id == settings.admin_chat_id:
+        await message.answer(
             "👋 Привет, Админ!\n\n"
             "Доступные команды:\n"
             "/clients - Список клиентов\n"
@@ -125,7 +131,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
     # Отвечаем клиенту
-    await update.message.reply_text(
+    await message.answer(
         "👋 Здравствуйте!\n\n"
         "Я бот для связи с поддержкой. Напишите ваш вопрос, "
         "и я передам его оператору. Скоро вам ответят!"
@@ -133,23 +139,28 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     # Уведомляем админа
     display_name = get_user_display_name(user_id, username, full_name)
-    await context.bot.send_message(
+    await bot.send_message(
         chat_id=settings.admin_chat_id,
         text=f"🆕 Новый пользователь: {display_name} (ID: {user_id})\nОтправил команду /start",
     )
 
 
-async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+def is_client_message(message: Message) -> bool:
+    """Проверка, что это сообщение от клиента (не от админа)"""
+    return settings is None or message.chat.id != settings.admin_chat_id
+
+
+@router.message(
+    F.chat.type == "private",
+    ~F.text.startswith("/"),
+    is_client_message
+)
+async def handle_client_message(message: Message) -> None:
     """Обработчик сообщений от клиентов"""
-    if not update.message or not settings or not db:
+    if not message.from_user or not settings or not db or not bot:
         return
 
-    # Игнорируем сообщения от админа
-    if update.effective_chat and update.effective_chat.id == settings.admin_chat_id:
-        return
-
-    user_id, username, full_name = get_user_info(update)
-    message = update.message
+    user_id, username, full_name = get_user_info(message)
 
     # Определяем тип сообщения
     if message.text:
@@ -191,22 +202,22 @@ async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TY
     # Формируем уведомление для админа
     display_name = get_user_display_name(user_id, username, full_name)
 
-    # Создаем кнопку "Ответить"
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✉️ Ответить", callback_data=f"reply:{user_id}")],
-        [InlineKeyboardButton("📜 История", callback_data=f"history:{user_id}")]
+    # Создаем кнопки
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✉️ Ответить", callback_data=f"reply:{user_id}")],
+        [InlineKeyboardButton(text="📜 История", callback_data=f"history:{user_id}")]
     ])
 
     # Отправляем уведомление админу
     if message_type == "text":
-        await context.bot.send_message(
+        await bot.send_message(
             chat_id=settings.admin_chat_id,
             text=f"💬 Сообщение от {display_name}\nID: {user_id}\n\n{content}",
             reply_markup=keyboard,
         )
     else:
         # Сначала отправляем заголовок
-        await context.bot.send_message(
+        await bot.send_message(
             chat_id=settings.admin_chat_id,
             text=f"💬 Сообщение от {display_name}\nID: {user_id}\nТип: {message_type}",
             reply_markup=keyboard,
@@ -214,11 +225,7 @@ async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TY
 
         # Затем пересылаем само сообщение
         try:
-            await context.bot.copy_message(
-                chat_id=settings.admin_chat_id,
-                from_chat_id=message.chat_id,
-                message_id=message.message_id,
-            )
+            await message.copy_to(settings.admin_chat_id)
         except Exception as e:
             logger.error(f"Не удалось переслать медиа: {e}")
 
@@ -226,36 +233,33 @@ async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 # ===== ОБРАБОТЧИКИ КНОПОК =====
-async def button_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+@router.callback_query(F.data.startswith("reply:"))
+async def button_reply(callback: CallbackQuery) -> None:
     """
     Обработчик нажатия кнопки "Ответить"
     Показывает приглашение написать ответ
     """
-    if not update.callback_query or not settings:
+    if not callback.data or not settings or not bot:
         return
 
-    query = update.callback_query
-    await query.answer()
+    await callback.answer()
 
     # Извлекаем user_id из callback_data
-    callback_data = query.data or ""
-    if not callback_data.startswith("reply:"):
-        return
-
     try:
-        user_id = int(callback_data.split(":")[1])
+        user_id = int(callback.data.split(":")[1])
     except (ValueError, IndexError):
-        await query.answer("❌ Ошибка: неверный ID пользователя", show_alert=True)
+        await callback.answer("❌ Ошибка: неверный ID пользователя", show_alert=True)
         return
 
     # Убираем кнопки с исходного сообщения
     try:
-        await query.edit_message_reply_markup(reply_markup=None)
+        if callback.message:
+            await callback.message.edit_reply_markup(reply_markup=None)
     except Exception:
         pass
 
     # Отправляем приглашающее сообщение
-    prompt_msg = await context.bot.send_message(
+    prompt_msg = await bot.send_message(
         chat_id=settings.admin_chat_id,
         text=f"✍️ Ответ для клиента ID: {user_id}\n\n"
              "Напишите следующее текстовое сообщение в этом чате, "
@@ -263,41 +267,34 @@ async def button_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
 
     # Сохраняем информацию о том, что ждём ответ для этого клиента
-    if "pending_replies" not in context.bot_data:
-        context.bot_data["pending_replies"] = {}
-
-    context.bot_data["pending_replies"][settings.admin_chat_id] = {
-        "user_id": user_id,
-        "prompt_message_id": prompt_msg.message_id,
-    }
+    pending_replies[settings.admin_chat_id] = prompt_msg.message_id
+    # Также сохраняем user_id в глобальном состоянии
+    global current_reply_user_id
+    current_reply_user_id = user_id
 
     logger.info(f"Админ начал отвечать клиенту {user_id}")
 
 
-async def button_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+@router.callback_query(F.data.startswith("history:"))
+async def button_history(callback: CallbackQuery) -> None:
     """Обработчик нажатия кнопки "История" """
-    if not update.callback_query or not settings or not db:
+    if not callback.data or not settings or not db or not bot:
         return
 
-    query = update.callback_query
-    await query.answer()
+    await callback.answer()
 
     # Извлекаем user_id из callback_data
-    callback_data = query.data or ""
-    if not callback_data.startswith("history:"):
-        return
-
     try:
-        user_id = int(callback_data.split(":")[1])
+        user_id = int(callback.data.split(":")[1])
     except (ValueError, IndexError):
-        await query.answer("❌ Ошибка: неверный ID пользователя", show_alert=True)
+        await callback.answer("❌ Ошибка: неверный ID пользователя", show_alert=True)
         return
 
     # Получаем историю
     history = db.get_history(user_id, limit=20)
 
     if not history:
-        await context.bot.send_message(
+        await bot.send_message(
             chat_id=settings.admin_chat_id,
             text=f"📜 История с клиентом {user_id}\n\nИстория пуста.",
         )
@@ -320,7 +317,7 @@ async def button_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     history_text = "\n".join(lines)
 
-    await context.bot.send_message(
+    await bot.send_message(
         chat_id=settings.admin_chat_id,
         text=history_text,
         parse_mode=ParseMode.HTML,
@@ -330,35 +327,42 @@ async def button_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 # ===== ОБРАБОТЧИКИ СООБЩЕНИЙ АДМИНА =====
-async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+current_reply_user_id: Optional[int] = None
+
+
+def is_admin_chat(message: Message) -> bool:
+    """Проверка, что сообщение от админа"""
+    return settings is not None and message.chat.id == settings.admin_chat_id
+
+
+@router.message(
+    is_admin_chat,
+    F.text,
+    ~F.text.startswith("/")
+)
+async def handle_admin_message(message: Message) -> None:
     """Обработчик текстовых сообщений от админа (ответы клиентам)"""
-    if not update.message or not settings or not db:
+    if not settings or not db or not bot:
         return
 
-    # Проверяем, что это сообщение от админа
-    if update.effective_chat and update.effective_chat.id != settings.admin_chat_id:
-        return
+    global current_reply_user_id
 
     # Проверяем, есть ли ожидающий ответ
-    if "pending_replies" not in context.bot_data:
+    if settings.admin_chat_id not in pending_replies or current_reply_user_id is None:
         return
 
-    pending = context.bot_data["pending_replies"].get(settings.admin_chat_id)
-    if not pending:
-        return
-
-    user_id = pending["user_id"]
-    prompt_message_id = pending["prompt_message_id"]
+    user_id = current_reply_user_id
+    prompt_message_id = pending_replies[settings.admin_chat_id]
 
     # Получаем текст ответа
-    reply_text = update.message.text
+    reply_text = message.text
     if not reply_text:
-        await update.message.reply_text("❌ Ответ должен содержать текст")
+        await message.answer("❌ Ответ должен содержать текст")
         return
 
     try:
         # Отправляем сообщение клиенту
-        await context.bot.send_message(
+        await bot.send_message(
             chat_id=user_id,
             text=reply_text,
         )
@@ -375,7 +379,7 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
         # Удаляем приглашающее сообщение
         try:
-            await context.bot.delete_message(
+            await bot.delete_message(
                 chat_id=settings.admin_chat_id,
                 message_id=prompt_message_id,
             )
@@ -383,36 +387,37 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
             logger.debug(f"Не удалось удалить приглашение: {e}")
 
         # Показываем подтверждение
-        await update.message.reply_text(
+        await message.answer(
             f"✅ Сообщение отправлено клиенту {user_id}"
         )
 
         # Очищаем состояние
-        del context.bot_data["pending_replies"][settings.admin_chat_id]
+        del pending_replies[settings.admin_chat_id]
+        current_reply_user_id = None
 
         logger.info(f"Админ отправил ответ клиенту {user_id}")
 
     except Exception as e:
         logger.error(f"Ошибка отправки сообщения клиенту: {e}")
-        await update.message.reply_text(
+        await message.answer(
             f"❌ Ошибка отправки сообщения: {e}"
         )
 
 
 # ===== КОМАНДЫ АДМИНА =====
-async def clients_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+@router.message(
+    Command("clients"),
+    is_admin_chat
+)
+async def clients_command(message: Message) -> None:
     """Команда /clients - показать список клиентов"""
-    if not update.message or not settings or not db:
-        return
-
-    # Проверяем, что команда от админа
-    if update.effective_chat and update.effective_chat.id != settings.admin_chat_id:
+    if not settings or not db:
         return
 
     clients = db.list_clients()
 
     if not clients:
-        await update.message.reply_text("📋 Клиентов пока нет")
+        await message.answer("📋 Клиентов пока нет")
         return
 
     # Формируем список клиентов
@@ -430,14 +435,14 @@ async def clients_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         # Добавляем кнопки для быстрого доступа
         keyboard.append([
             InlineKeyboardButton(
-                f"💬 {display_name}",
+                text=f"💬 {display_name}",
                 callback_data=f"history:{user_id}"
             )
         ])
 
-    reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+    reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard) if keyboard else None
 
-    await update.message.reply_text(
+    await message.answer(
         "\n".join(lines),
         parse_mode=ParseMode.HTML,
         reply_markup=reply_markup,
@@ -446,34 +451,37 @@ async def clients_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     logger.info(f"Показан список из {len(clients)} клиентов")
 
 
-async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+@router.message(
+    Command("history"),
+    is_admin_chat
+)
+async def history_command(message: Message) -> None:
     """Команда /history <user_id> - показать историю с клиентом"""
-    if not update.message or not settings or not db:
+    if not settings or not db or not message.text:
         return
 
-    # Проверяем, что команда от админа
-    if update.effective_chat and update.effective_chat.id != settings.admin_chat_id:
-        return
+    # Парсим аргументы из текста команды
+    parts = message.text.split()
 
     # Проверяем аргументы
-    if not context.args:
-        await update.message.reply_text(
+    if len(parts) < 2:
+        await message.answer(
             "❌ Использование: /history <user_id> [лимит]\n"
             "Пример: /history 123456789 50"
         )
         return
 
     try:
-        user_id = int(context.args[0])
+        user_id = int(parts[1])
     except ValueError:
-        await update.message.reply_text("❌ ID пользователя должен быть числом")
+        await message.answer("❌ ID пользователя должен быть числом")
         return
 
     # Получаем лимит (по умолчанию 20)
     limit = 20
-    if len(context.args) >= 2:
+    if len(parts) >= 3:
         try:
-            limit = max(1, min(100, int(context.args[1])))
+            limit = max(1, min(100, int(parts[2])))
         except ValueError:
             pass
 
@@ -481,7 +489,7 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     history = db.get_history(user_id, limit)
 
     if not history:
-        await update.message.reply_text(
+        await message.answer(
             f"📜 История с клиентом {user_id}\n\nИстория пуста."
         )
         return
@@ -503,7 +511,7 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     history_text = "\n".join(lines)
 
-    await update.message.reply_text(
+    await message.answer(
         history_text,
         parse_mode=ParseMode.HTML,
     )
@@ -514,7 +522,7 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 # ===== ГЛАВНАЯ ФУНКЦИЯ =====
 async def main() -> None:
     """Главная функция запуска бота"""
-    global settings, db
+    global settings, db, bot
 
     # Загружаем настройки
     settings = Settings.load()
@@ -526,53 +534,20 @@ async def main() -> None:
     logger.info(f"✅ База данных: {settings.database_path}")
     logger.info(f"✅ Админ ID: {settings.admin_chat_id}")
 
-    # Создаем приложение
-    application = ApplicationBuilder().token(settings.token).build()
+    # Создаем бота и диспетчер
+    bot = Bot(token=settings.token)
+    dp = Dispatcher()
 
-    # ===== РЕГИСТРАЦИЯ ОБРАБОТЧИКОВ =====
-
-    # Команды
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("clients", clients_command))
-    application.add_handler(CommandHandler("history", history_command))
-
-    # Кнопки (callback queries) - ПЕРВЫМИ!
-    application.add_handler(CallbackQueryHandler(button_reply, pattern=r"^reply:"))
-    application.add_handler(CallbackQueryHandler(button_history, pattern=r"^history:"))
-
-    # Сообщения от админа (ответы клиентам) - более специфичный фильтр идёт раньше
-    application.add_handler(
-        MessageHandler(
-            filters.Chat(settings.admin_chat_id)
-            & filters.TEXT
-            & (~filters.COMMAND),
-            handle_admin_message,
-        )
-    )
-
-    # Сообщения от клиентов В ПОСЛЕДНЮЮ ОЧЕРЕДЬ - используем конкретные типы вместо ALL
-    application.add_handler(
-        MessageHandler(
-            (filters.TEXT | filters.PHOTO | filters.DOCUMENT | filters.VOICE | filters.VIDEO)
-            & (~filters.COMMAND)
-            & (~filters.Chat(settings.admin_chat_id)),
-            handle_client_message,
-        )
-    )
+    # Регистрируем роутер
+    dp.include_router(router)
 
     # Запускаем бота
     logger.info("🚀 Бот запущен и готов к работе!")
 
-    await application.initialize()
-    await application.start()
-
     try:
-        await application.updater.start_polling()
-        await asyncio.Event().wait()
+        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
-        await application.updater.stop()
-        await application.stop()
-        await application.shutdown()
+        await bot.session.close()
 
 
 if __name__ == "__main__":
