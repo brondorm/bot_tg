@@ -291,7 +291,7 @@ async def button_history(callback: CallbackQuery) -> None:
         return
 
     # Получаем историю
-    history = db.get_history(user_id, limit=20)
+    history = db.get_history(user_id, limit=30)
 
     if not history:
         await bot.send_message(
@@ -317,13 +317,35 @@ async def button_history(callback: CallbackQuery) -> None:
 
     history_text = "\n".join(lines)
 
+    # Добавляем кнопку "Закрыть историю"
+    close_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Закрыть историю", callback_data="close_history")]
+    ])
+
     await bot.send_message(
         chat_id=settings.admin_chat_id,
         text=history_text,
         parse_mode=ParseMode.HTML,
+        reply_markup=close_keyboard,
     )
 
     logger.info(f"Показана история для клиента {user_id}")
+
+
+@router.callback_query(F.data == "close_history")
+async def button_close_history(callback: CallbackQuery) -> None:
+    """Обработчик нажатия кнопки 'Закрыть историю' - удаляет сообщение с историей"""
+    if not callback.message:
+        return
+
+    await callback.answer()
+
+    try:
+        await callback.message.delete()
+        logger.info("История закрыта (сообщение удалено)")
+    except Exception as e:
+        logger.error(f"Не удалось удалить сообщение с историей: {e}")
+        await callback.answer("❌ Ошибка при удалении сообщения", show_alert=True)
 
 
 # ===== ОБРАБОТЧИКИ СООБЩЕНИЙ АДМИНА =====
@@ -477,8 +499,8 @@ async def history_command(message: Message) -> None:
         await message.answer("❌ ID пользователя должен быть числом")
         return
 
-    # Получаем лимит (по умолчанию 20)
-    limit = 20
+    # Получаем лимит (по умолчанию 30)
+    limit = 30
     if len(parts) >= 3:
         try:
             limit = max(1, min(100, int(parts[2])))
@@ -511,9 +533,15 @@ async def history_command(message: Message) -> None:
 
     history_text = "\n".join(lines)
 
+    # Добавляем кнопку "Закрыть историю"
+    close_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Закрыть историю", callback_data="close_history")]
+    ])
+
     await message.answer(
         history_text,
         parse_mode=ParseMode.HTML,
+        reply_markup=close_keyboard,
     )
 
     logger.info(f"Показана история для клиента {user_id} ({len(history)} сообщений)")
