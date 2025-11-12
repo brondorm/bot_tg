@@ -110,13 +110,18 @@ async def start_command(message: Message) -> None:
 
     user_id, username, full_name = get_user_info(message)
 
-    # Если это админ, просто приветствуем
+    # Если это админ, показываем меню
     if message.chat.id == settings.admin_chat_id:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="👥 Все клиенты", callback_data="clients_list")],
+        ])
         await message.answer(
             "👋 Привет, Админ!\n\n"
             "Доступные команды:\n"
             "/clients - Список клиентов\n"
-            "/history <user_id> - История с клиентом"
+            "/history <user_id> - История с клиентом\n\n"
+            "Или используйте меню ниже:",
+            reply_markup=keyboard
         )
         return
 
@@ -326,6 +331,142 @@ async def button_history(callback: CallbackQuery) -> None:
     logger.info(f"Показана история для клиента {user_id}")
 
 
+@router.callback_query(F.data == "clients_list")
+async def button_clients_list(callback: CallbackQuery) -> None:
+    """Обработчик кнопки "Все клиенты" - показывает список всех клиентов"""
+    if not callback.message or not settings or not db or not bot:
+        return
+
+    await callback.answer()
+
+    clients = db.list_clients()
+
+    if not clients:
+        await callback.message.answer("📋 Клиентов пока нет")
+        return
+
+    # Формируем список клиентов с кнопками
+    lines = ["👥 <b>Список клиентов:</b>\n"]
+
+    for user_id, username, full_name, last_message in clients[:20]:
+        display_name = get_user_display_name(user_id, username, full_name)
+        lines.append(
+            f"• {html.escape(display_name)}\n"
+            f"  ID: <code>{user_id}</code>\n"
+            f"  Последнее сообщение: {last_message}\n"
+        )
+
+    # Создаем кнопки для каждого клиента (по 2 кнопки на ряд)
+    keyboard = []
+    for user_id, username, full_name, _ in clients[:20]:
+        display_name = get_user_display_name(user_id, username, full_name)
+        # Ограничиваем длину имени для кнопки
+        short_name = display_name[:20] + "..." if len(display_name) > 20 else display_name
+
+        keyboard.append([
+            InlineKeyboardButton(
+                text=f"📜 {short_name}",
+                callback_data=f"client_detail:{user_id}"
+            )
+        ])
+
+    reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    await callback.message.answer(
+        "\n".join(lines),
+        parse_mode=ParseMode.HTML,
+        reply_markup=reply_markup,
+    )
+
+    logger.info(f"Показан список из {len(clients)} клиентов через кнопку")
+
+
+@router.callback_query(F.data.startswith("client_detail:"))
+async def button_client_detail(callback: CallbackQuery) -> None:
+    """Обработчик кнопки с деталями клиента - показывает меню действий"""
+    if not callback.data or not callback.message or not settings or not db or not bot:
+        return
+
+    await callback.answer()
+
+    # Извлекаем user_id из callback_data
+    try:
+        user_id = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        await callback.answer("❌ Ошибка: неверный ID пользователя", show_alert=True)
+        return
+
+    # Получаем информацию о клиенте
+    clients = db.list_clients()
+    client_info = None
+    for cid, username, full_name, last_message in clients:
+        if cid == user_id:
+            client_info = (username, full_name, last_message)
+            break
+
+    if not client_info:
+        await callback.message.answer(f"❌ Клиент {user_id} не найден")
+        return
+
+    username, full_name, last_message = client_info
+    display_name = get_user_display_name(user_id, username, full_name)
+
+    # Создаем меню действий для этого клиента
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="📜 История", callback_data=f"history:{user_id}"),
+            InlineKeyboardButton(text="✉️ Написать", callback_data=f"write:{user_id}")
+        ],
+        [InlineKeyboardButton(text="« Назад к списку", callback_data="clients_list")]
+    ])
+
+    await callback.message.answer(
+        f"👤 <b>Клиент:</b> {html.escape(display_name)}\n"
+        f"🆔 <b>ID:</b> <code>{user_id}</code>\n"
+        f"📧 <b>Username:</b> {f'@{username}' if username else 'не указан'}\n"
+        f"📝 <b>Имя:</b> {html.escape(full_name) if full_name else 'не указано'}\n"
+        f"🕐 <b>Последняя активность:</b> {last_message}\n\n"
+        f"Выберите действие:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard,
+    )
+
+    logger.info(f"Показана детальная информация о клиенте {user_id}")
+
+
+@router.callback_query(F.data.startswith("write:"))
+async def button_write(callback: CallbackQuery) -> None:
+    """
+    Обработчик кнопки "Написать" - инициирует режим отправки сообщения клиенту
+    """
+    if not callback.data or not callback.message or not settings or not bot:
+        return
+
+    await callback.answer()
+
+    # Извлекаем user_id из callback_data
+    try:
+        user_id = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        await callback.answer("❌ Ошибка: неверный ID пользователя", show_alert=True)
+        return
+
+    # Отправляем приглашающее сообщение
+    prompt_msg = await bot.send_message(
+        chat_id=settings.admin_chat_id,
+        text=f"✍️ Напишите сообщение для клиента ID: {user_id}\n\n"
+             "Следующее текстовое сообщение в этом чате будет отправлено клиенту.",
+    )
+
+    # Сохраняем информацию о том, что ждём ответ для этого клиента
+    pending_replies[settings.admin_chat_id] = prompt_msg.message_id
+    # Также сохраняем user_id в глобальном состоянии
+    global current_reply_user_id
+    current_reply_user_id = user_id
+
+    logger.info(f"Админ начал писать сообщение клиенту {user_id}")
+
+
 # ===== ОБРАБОТЧИКИ СООБЩЕНИЙ АДМИНА =====
 current_reply_user_id: Optional[int] = None
 
@@ -428,15 +569,22 @@ async def clients_command(message: Message) -> None:
         display_name = get_user_display_name(user_id, username, full_name)
         lines.append(
             f"• {html.escape(display_name)}\n"
-            f"  ID: {user_id}\n"
+            f"  ID: <code>{user_id}</code>\n"
             f"  Последнее сообщение: {last_message}\n"
         )
 
-        # Добавляем кнопки для быстрого доступа
+        # Ограничиваем длину имени для кнопки
+        short_name = display_name[:15] + "..." if len(display_name) > 15 else display_name
+
+        # Добавляем кнопки для быстрого доступа (История и Написать)
         keyboard.append([
             InlineKeyboardButton(
-                text=f"💬 {display_name}",
+                text=f"📜 {short_name}",
                 callback_data=f"history:{user_id}"
+            ),
+            InlineKeyboardButton(
+                text="✉️",
+                callback_data=f"write:{user_id}"
             )
         ])
 
